@@ -43,8 +43,11 @@ public class Producer extends Thread {
                     final int transactionTimeoutMs,
                     final CountDownLatch latch) {
         Properties props = new Properties();
+
+        //拉取kafka元数据
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, KafkaProperties.KAFKA_SERVER_URL + ":" + KafkaProperties.KAFKA_SERVER_PORT);
         props.put(ProducerConfig.CLIENT_ID_CONFIG, "DemoProducer");
+        //设置序列化器
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, IntegerSerializer.class.getName());
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
         if (transactionTimeoutMs > 0) {
@@ -55,6 +58,7 @@ public class Producer extends Thread {
         }
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, enableIdempotency);
 
+        //初始化kafkaProducer对象
         producer = new KafkaProducer<>(props);
         this.topic = topic;
         this.isAsync = isAsync;

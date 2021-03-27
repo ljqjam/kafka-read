@@ -447,7 +447,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             }
             this.errors = this.metrics.sensor("errors");
 
-            //FIXME new一个Sender，以及初始化一个重要的管理网络的组件
+            //FIXME new一个Sender线程，以及初始化一个NetworkClient
             this.sender = newSender(logContext, kafkaClient, this.metadata);
             String ioThreadName = NETWORK_THREAD_PREFIX + " | " + clientId;
             this.ioThread = new KafkaThread(ioThreadName, this.sender, true);
@@ -908,7 +908,9 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
     @Override
     public Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback) {
         // intercept the record, which can be potentially modified; this method does not throw exceptions
+        //拦截器进行处理数据
         ProducerRecord<K, V> interceptedRecord = this.interceptors.onSend(record);
+        //发送代码
         return doSend(interceptedRecord, callback);
     }
 
@@ -925,11 +927,15 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
     private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback callback) {
         TopicPartition tp = null;
         try {
+            //sender线程关闭抛异常
             throwIfProducerClosed();
             // first make sure the metadata for the topic is available
+            //当前时间
             long nowMs = time.milliseconds();
+            //拉取元数据用的时间
             ClusterAndWaitTime clusterAndWaitTime;
             try {
+                //等待拉取元数据
                 clusterAndWaitTime = waitOnMetadata(record.topic(), record.partition(), nowMs, maxBlockTimeMs);
             } catch (KafkaException e) {
                 if (metadata.isClosed())
@@ -1043,16 +1049,19 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
      */
     private ClusterAndWaitTime waitOnMetadata(String topic, Integer partition, long nowMs, long maxWaitMs) throws InterruptedException {
         // add topic to metadata topic list if it is not there already and reset expiry
+        //内存中取
         Cluster cluster = metadata.fetch();
 
         if (cluster.invalidTopics().contains(topic))
             throw new InvalidTopicException(topic);
 
+        //没有的话把topic放到newTopics与Topics中，加了synchronized
         metadata.add(topic, nowMs);
 
         Integer partitionsCount = cluster.partitionCountForTopic(topic);
         // Return cached metadata if we have it, and if the record's partition is either undefined
         // or within the known partition range
+        //缓存的partitionsCount不为空，要么就指定的partition满足
         if (partitionsCount != null && (partition == null || partition < partitionsCount))
             return new ClusterAndWaitTime(cluster, 0);
 
@@ -1068,9 +1077,12 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 log.trace("Requesting metadata update for topic {}.", topic);
             }
             metadata.add(topic, nowMs + elapsed);
+            //设置更新标志
             int version = metadata.requestUpdateForTopic(topic);
+            //唤醒sender线程，sender线程进行拉取
             sender.wakeup();
             try {
+                //等待元数据拉取 synchronized
                 metadata.awaitUpdate(version, remainingWaitMs);
             } catch (TimeoutException ex) {
                 // Rethrow with original maxWaitMs to prevent logging exception with remainingWaitMs
@@ -1078,8 +1090,10 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                         String.format("Topic %s not present in metadata after %d ms.",
                                 topic, maxWaitMs));
             }
+            //再次重试获取
             cluster = metadata.fetch();
             elapsed = time.milliseconds() - nowMs;
+            //看下是否超时
             if (elapsed >= maxWaitMs) {
                 throw new TimeoutException(partitionsCount == null ?
                         String.format("Topic %s not present in metadata after %d ms.",
@@ -1089,6 +1103,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             }
             metadata.maybeThrowExceptionForTopic(topic);
             remainingWaitMs = maxWaitMs - elapsed;
+            //再次那topic的partitionsCount
             partitionsCount = cluster.partitionCountForTopic(topic);
         } while (partitionsCount == null || (partition != null && partition >= partitionsCount));
 

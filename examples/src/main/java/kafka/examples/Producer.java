@@ -78,11 +78,13 @@ public class Producer extends Thread {
             String messageStr = "Message_" + messageKey;
             long startTime = System.currentTimeMillis();
             if (isAsync) { // Send asynchronously
+                //异步发送
                 producer.send(new ProducerRecord<>(topic,
                     messageKey,
                     messageStr), new DemoCallBack(startTime, messageKey, messageStr));
             } else { // Send synchronously
                 try {
+                    //同步
                     producer.send(new ProducerRecord<>(topic,
                         messageKey,
                         messageStr)).get();

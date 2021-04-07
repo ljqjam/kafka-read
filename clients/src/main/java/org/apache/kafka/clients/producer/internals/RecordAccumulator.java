@@ -77,6 +77,7 @@ public final class RecordAccumulator {
     private final BufferPool free;
     private final Time time;
     private final ApiVersions apiVersions;
+    //分区->队列
     private final ConcurrentMap<TopicPartition, Deque<ProducerBatch>> batches;
     private final IncompleteBatches incomplete;
     // The following variables are only accessed by the sender thread, so we don't need to protect them.
@@ -193,7 +194,9 @@ public final class RecordAccumulator {
         if (headers == null) headers = Record.EMPTY_HEADERS;
         try {
             // check if we have an in-progress batch
+            //根据分区选择到对应的队列
             Deque<ProducerBatch> dq = getOrCreateDeque(tp);
+            //锁队列，尝试追加信息
             synchronized (dq) {
                 if (closed)
                     throw new KafkaException("Producer closed while send in progress");
@@ -203,14 +206,18 @@ public final class RecordAccumulator {
             }
 
             // we don't have an in-progress record batch try to allocate a new batch
+            //append没有成功,需要新创建Batch
             if (abortOnNewBatch) {
                 // Return a result that will cause another call to append.
                 return new RecordAppendResult(null, false, false, true);
             }
 
+            //计算一个批次大小，标准批次与消息大小取其大值
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
             int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {} with remaining timeout {}ms", size, tp.topic(), tp.partition(), maxTimeToBlock);
+
+            //根据批次大小分配内存
             buffer = free.allocate(size, maxTimeToBlock);
 
             // Update the current time in case the buffer allocation blocked above.
@@ -220,17 +227,20 @@ public final class RecordAccumulator {
                 if (closed)
                     throw new KafkaException("Producer closed while send in progress");
 
+                //再次尝试把数据写入批次里面，没有批次的话失败了
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq, nowMs);
                 if (appendResult != null) {
                     // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
                     return appendResult;
                 }
 
+                //根据magic去构造消息格式
                 MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
                 ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, nowMs);
                 FutureRecordMetadata future = Objects.requireNonNull(batch.tryAppend(timestamp, key, value, headers,
                         callback, nowMs));
 
+                //将批次加到队尾
                 dq.addLast(batch);
                 incomplete.add(batch);
 
@@ -239,6 +249,14 @@ public final class RecordAccumulator {
                 return new RecordAppendResult(future, dq.size() > 1 || batch.isFull(), true, false);
             }
         } finally {
+            /*
+                FIXME 这些finally都考虑的很周道
+                释放内存
+                在并发的情况下，这函数代码是分段加锁 （线程安全，尽量保障性能）
+                1. 创建队列  2. 分配内存  3. 创建批次
+                所以可能是都申请了内存，但后面的线程2，写到了线程1创建的批次。所以需要释放
+                成功的会去置为null
+             */
             if (buffer != null)
                 free.deallocate(buffer);
             appendsInProgress.decrementAndGet();
@@ -263,8 +281,10 @@ public final class RecordAccumulator {
      */
     private RecordAppendResult tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers,
                                          Callback callback, Deque<ProducerBatch> deque, long nowMs) {
+        //从队列中取最后一个批次
         ProducerBatch last = deque.peekLast();
         if (last != null) {
+            //尝试追加
             FutureRecordMetadata future = last.tryAppend(timestamp, key, value, headers, callback, nowMs);
             if (future == null)
                 last.closeForRecordAppends();
@@ -648,10 +668,12 @@ public final class RecordAccumulator {
      * Get the deque for the given topic-partition, creating it if necessary.
      */
     private Deque<ProducerBatch> getOrCreateDeque(TopicPartition tp) {
+        //batches kafka自己封装的一个数据结构CopyOnWriteMap 读写分离
         Deque<ProducerBatch> d = this.batches.get(tp);
         if (d != null)
             return d;
         d = new ArrayDeque<>();
+        //将空队列存入batches
         Deque<ProducerBatch> previous = this.batches.putIfAbsent(tp, d);
         if (previous == null)
             return d;

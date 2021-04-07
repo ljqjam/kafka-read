@@ -1,4 +1,5 @@
-基于kafka2.1.0源码阅读笔记
+以下为之前阅读kafka0.10的源码阅读笔记
+代码为最新2.8版本的源码分析
 
 生产者：
 examples/src/main/java/kafka/examples/Producer.java

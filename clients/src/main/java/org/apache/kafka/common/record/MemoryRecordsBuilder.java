@@ -781,13 +781,16 @@ public class MemoryRecordsBuilder implements AutoCloseable {
      * re-allocation in the underlying byte buffer stream.
      */
     public boolean hasRoomFor(long timestamp, ByteBuffer key, ByteBuffer value, Header[] headers) {
+        //满了
         if (isFull())
             return false;
 
         // We always allow at least one record to be appended (the ByteBufferOutputStream will grow as needed)
+        //一条消息都没有
         if (numRecords == 0)
             return true;
 
+        //根据不同魔法标识（不同消息格式）记算消息长度
         final int recordSize;
         if (magic < RecordBatch.MAGIC_VALUE_V2) {
             recordSize = Records.LOG_OVERHEAD + LegacyRecord.recordSize(magic, key, value);

@@ -32,6 +32,7 @@ public interface RecordBatch extends Iterable<Record> {
 
     /**
      * The "magic" values
+     * 魔数标识，与消息格式有关
      */
     byte MAGIC_VALUE_V0 = 0;
     byte MAGIC_VALUE_V1 = 1;

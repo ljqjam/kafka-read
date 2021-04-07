@@ -942,10 +942,12 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                     throw new KafkaException("Producer closed while send in progress", e);
                 throw e;
             }
+            //计算剩余时间
             nowMs += clusterAndWaitTime.waitedOnMetadataMs;
             long remainingWaitMs = Math.max(0, maxBlockTimeMs - clusterAndWaitTime.waitedOnMetadataMs);
             Cluster cluster = clusterAndWaitTime.cluster;
             byte[] serializedKey;
+            //进行序列化
             try {
                 serializedKey = keySerializer.serialize(record.topic(), record.headers(), record.key());
             } catch (ClassCastException cce) {
@@ -961,39 +963,56 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                         " to class " + producerConfig.getClass(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG).getName() +
                         " specified in value.serializer", cce);
             }
+
+            //计算分区
             int partition = partition(record, serializedKey, serializedValue, cluster);
+
+            //根据分区封装TopicPartition
             tp = new TopicPartition(record.topic(), partition);
 
             setReadOnly(record.headers());
             Header[] headers = record.headers().toArray();
 
+            //检查长度是否超标（单条长消息以及是否超过RecordAccumulator大小）
             int serializedSize = AbstractRecords.estimateSizeInBytesUpperBound(apiVersions.maxUsableProduceMagic(),
                     compressionType, serializedKey, serializedValue, headers);
             ensureValidRecordSize(serializedSize);
+
             long timestamp = record.timestamp() == null ? nowMs : record.timestamp();
             if (log.isTraceEnabled()) {
                 log.trace("Attempting to append record {} with callback {} to topic {} partition {}", record, callback, record.topic(), partition);
             }
+
+            //给消息绑定回调函数
             // producer callback will make sure to call both 'callback' and interceptor callback
             Callback interceptCallback = new InterceptorCallback<>(callback, this.interceptors, tp);
 
+            //事务的话，检查
             if (transactionManager != null && transactionManager.isTransactional()) {
                 transactionManager.failIfNotReadyForSend();
             }
+
+            //步骤七：把消息放入accumulator（32M的一个内存）accumulator把消息封装成一个一个批次去发送 FIXME 重要
             RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey,
                     serializedValue, headers, interceptCallback, remainingWaitMs, true, nowMs);
 
+            //append没有成功,需要新创建Batch
+            //对比起旧版本
+            //这种模式一个最大的优势在于可以最大限度的保障每个batch的消息足够多，并且不至于会有过多的空batch提前申请，因为默认分区模式下，一组序列消息总是会被分散到各个分区中，会导致每个batch的消息不够大，最终会导致客户端请求频次过多，而Sticky的模式可以降低请求频次，提升整体发送迟延.
+            //https://blog.csdn.net/flykinghg/article/details/101554380
             if (result.abortForNewBatch) {
                 int prevPartition = partition;
+                //新的分区
                 partitioner.onNewBatch(record.topic(), cluster, prevPartition);
                 partition = partition(record, serializedKey, serializedValue, cluster);
+                //重新封装TopicPartition
                 tp = new TopicPartition(record.topic(), partition);
                 if (log.isTraceEnabled()) {
                     log.trace("Retrying append due to new batch creation for topic {} partition {}. The old partition was {}", record.topic(), partition, prevPartition);
                 }
                 // producer callback will make sure to call both 'callback' and interceptor callback
                 interceptCallback = new InterceptorCallback<>(callback, this.interceptors, tp);
-
+                //再来一次
                 result = accumulator.append(tp, timestamp, serializedKey,
                     serializedValue, headers, interceptCallback, remainingWaitMs, false, nowMs);
             }
@@ -1003,6 +1022,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
 
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), partition);
+                //唤醒sender线程进行发送
                 this.sender.wakeup();
             }
             return result.future;
@@ -1103,7 +1123,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             }
             metadata.maybeThrowExceptionForTopic(topic);
             remainingWaitMs = maxWaitMs - elapsed;
-            //再次那topic的partitionsCount
+            //再次拿topic的partitionsCount
             partitionsCount = cluster.partitionCountForTopic(topic);
         } while (partitionsCount == null || (partition != null && partition >= partitionsCount));
 
@@ -1314,7 +1334,9 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
      * calls configured partitioner class to compute the partition.
      */
     private int partition(ProducerRecord<K, V> record, byte[] serializedKey, byte[] serializedValue, Cluster cluster) {
+        //消息就带着分区信息的
         Integer partition = record.partition();
+        //没有进行计算
         return partition != null ?
                 partition :
                 partitioner.partition(

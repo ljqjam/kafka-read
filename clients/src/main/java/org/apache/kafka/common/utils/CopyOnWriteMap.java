@@ -25,6 +25,9 @@ import java.util.concurrent.ConcurrentMap;
 
 /**
  * A simple read-optimized map implementation that synchronizes only writes and does a full copy on each modification
+ * 写耗费性能（上锁且需开辟空间，插入数据，赋值给map）读写分离，读直接从map读很快
+ * 读操作：每条消息都需要读
+ * 写操作：每个分区写一次就够了
  */
 public class CopyOnWriteMap<K, V> implements ConcurrentMap<K, V> {
 
@@ -55,6 +58,7 @@ public class CopyOnWriteMap<K, V> implements ConcurrentMap<K, V> {
 
     @Override
     public V get(Object k) {
+        //读直接获取
         return map.get(k);
     }
 
@@ -83,8 +87,16 @@ public class CopyOnWriteMap<K, V> implements ConcurrentMap<K, V> {
         this.map = Collections.emptyMap();
     }
 
+    /**
+     * 1. 使用synchronized修饰，线程安全。存内存操作，即使上锁也快
+     * 2. 赋值给map，map用volatile修饰，具有可见性
+     * @param k
+     * @param v
+     * @return
+     */
     @Override
     public synchronized V put(K k, V v) {
+        //写上锁，复制一份出来写
         Map<K, V> copy = new HashMap<K, V>(this.map);
         V prev = copy.put(k, v);
         this.map = Collections.unmodifiableMap(copy);

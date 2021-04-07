@@ -237,6 +237,7 @@ public class Sender implements Runnable {
         log.debug("Starting Kafka producer I/O thread.");
 
         // main loop, runs until close is called
+        //死循环
         while (running) {
             try {
                 runOnce();
@@ -250,6 +251,7 @@ public class Sender implements Runnable {
         // okay we stopped accepting requests but there may still be
         // requests in the transaction manager, accumulator or waiting for acknowledgment,
         // wait until these are completed.
+        //不是强行关闭，清一下
         while (!forceClose && ((this.accumulator.hasUndrained() || this.client.inFlightRequestCount() > 0) || hasPendingTransactionalRequests())) {
             try {
                 runOnce();
@@ -258,6 +260,7 @@ public class Sender implements Runnable {
             }
         }
 
+        //还有事务
         // Abort the transaction if any commit or abort didn't go through the transaction manager's queue
         while (!forceClose && transactionManager != null && transactionManager.hasOngoingTransaction()) {
             if (!transactionManager.isCompleting()) {
@@ -276,9 +279,11 @@ public class Sender implements Runnable {
             // the futures.
             if (transactionManager != null) {
                 log.debug("Aborting incomplete transactional requests due to forced shutdown");
+                //关闭事务
                 transactionManager.close();
             }
             log.debug("Aborting incomplete batches due to forced shutdown");
+            //抛弃未完成批次
             this.accumulator.abortIncompleteBatches();
         }
         try {
@@ -323,16 +328,22 @@ public class Sender implements Runnable {
         }
 
         long currentTimeMs = time.milliseconds();
+        //FIXME 发送数据
         long pollTimeout = sendProducerData(currentTimeMs);
+        //FIXME 拉取元数据
         client.poll(pollTimeout, currentTimeMs);
     }
 
     private long sendProducerData(long now) {
+        //获取元数据
         Cluster cluster = metadata.fetch();
         // get the list of partitions with data ready to send
+
+        //判断哪些partition有消息可以发送，获取次partition的leader partition对应broker而主机
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
         // if there are any partitions whose leaders are not known yet, force metadata update
+        //标识还没拉到元数据的topic
         if (!result.unknownLeaderTopics.isEmpty()) {
             // The set of topics with unknown leader contains topics with leader election pending as well as
             // topics which may have expired. Add the topic again to metadata to ensure it is included
@@ -350,15 +361,29 @@ public class Sender implements Runnable {
         long notReadyTimeout = Long.MAX_VALUE;
         while (iter.hasNext()) {
             Node node = iter.next();
+            //检查与要发送数据的主机网络是否已经连接好
             if (!this.client.ready(node, now)) {
                 iter.remove();
                 notReadyTimeout = Math.min(notReadyTimeout, this.client.pollDelayMs(node, now));
             }
         }
 
+        /**
+         *我们有可能要发送的partition多个，其中一些的leader partition在同一台服务器上
+         * p0:leader:0
+         * p1:leader:1
+         * p2:leader:2
+         * p3:leader:0
+         * 按照broker进行分组，同一broker的partition同一组
+         * p0，p3
+         * p1
+         * p2
+         */
         // create produce requests
         Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);
         addToInflightBatches(batches);
+
+
         if (guaranteeMessageOrder) {
             // Mute all the partitions drained
             for (List<ProducerBatch> batchList : batches.values()) {
@@ -367,6 +392,7 @@ public class Sender implements Runnable {
             }
         }
 
+        //放弃超时的batch
         accumulator.resetNextBatchExpiryTime();
         List<ProducerBatch> expiredInflightBatches = getExpiredInflightBatches(now);
         List<ProducerBatch> expiredBatches = this.accumulator.expiredBatches(now);
@@ -793,6 +819,7 @@ public class Sender implements Runnable {
         RequestCompletionHandler callback = response -> handleProduceResponse(response, recordsByPartition, time.milliseconds());
 
         String nodeId = Integer.toString(destination);
+        //创建发送的请求
         ClientRequest clientRequest = client.newClientRequest(nodeId, requestBuilder, now, acks != 0,
                 requestTimeoutMs, callback);
         client.send(clientRequest, now);

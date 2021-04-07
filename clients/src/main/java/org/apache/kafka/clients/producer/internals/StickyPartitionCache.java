@@ -36,6 +36,7 @@ public class StickyPartitionCache {
     }
 
     public int partition(String topic, Cluster cluster) {
+        //有从内存获取
         Integer part = indexCache.get(topic);
         if (part == null) {
             return nextPartition(topic, cluster, -1);

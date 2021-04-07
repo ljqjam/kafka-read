@@ -105,6 +105,7 @@ public class BufferPool {
      *         forever)
      */
     public ByteBuffer allocate(int size, long maxTimeToBlockMs) throws InterruptedException {
+        //默认32M
         if (size > this.totalMemory)
             throw new IllegalArgumentException("Attempt to allocate " + size
                                                + " bytes, but there is a hard limit of "
@@ -112,6 +113,7 @@ public class BufferPool {
                                                + " on memory allocations.");
 
         ByteBuffer buffer = null;
+        //加锁
         this.lock.lock();
 
         if (this.closed) {
@@ -121,31 +123,41 @@ public class BufferPool {
 
         try {
             // check if we have a free buffer of the right size pooled
+            //申请的内存是标准批次，同时这个队列中有剩，则直接队列中取
             if (size == poolableSize && !this.free.isEmpty())
                 return this.free.pollFirst();
 
             // now check if the request is immediately satisfiable with the
             // memory on hand or if we need to block
+            //free中个数*批次大小
             int freeListSize = freeSize() * this.poolableSize;
+            //目前可用的总内存（一个是标准内存块的地队列，一个是nonPooledAvailableMemory中的）
             if (this.nonPooledAvailableMemory + freeListSize >= size) {
                 // we have enough unallocated or pooled memory to immediately
                 // satisfy the request, but need to allocate the buffer
+                //这边要这样分，1.标准队列的空了，从nonPooledAvailableMemory里生产出一个标准的
+                //2. 标准队列不空，然后nonPooledAvailableMemory比size小，那就在里面把freeListSize的内存释放到nonPooledAvailableMemory，然后产出一个不标准批次
                 freeUp(size);
                 this.nonPooledAvailableMemory -= size;
             } else {
+                //目前的可用内存不够了，比如标准队列里只剩下一个批次16k，内存池还剩下10k，但是需要申请32K
                 // we are out of memory and will have to block
                 int accumulated = 0;
                 Condition moreMemory = this.lock.newCondition();
                 try {
+                    //超时时间
                     long remainingTimeToBlockNs = TimeUnit.MILLISECONDS.toNanos(maxTimeToBlockMs);
+                    //等待吧
                     this.waiters.addLast(moreMemory);
                     // loop over and over until we have a buffer or have reserved
                     // enough memory to allocate one
+                    //一次拿不出那么大内存，等着被人释放,一点一点拿
                     while (accumulated < size) {
                         long startWaitNs = time.nanoseconds();
                         long timeNs;
                         boolean waitingTimeElapsed;
                         try {
+                            //有人释放内存的话，唤醒此处
                             waitingTimeElapsed = !moreMemory.await(remainingTimeToBlockNs, TimeUnit.NANOSECONDS);
                         } finally {
                             long endWaitNs = time.nanoseconds();
@@ -165,11 +177,13 @@ public class BufferPool {
 
                         // check if we can satisfy this request from the free list,
                         // otherwise allocate memory
+                        //再次尝试内存池里面有没有数据，内存池中有数据，且刚好是批次大小，直接获取
                         if (accumulated == 0 && size == this.poolableSize && !this.free.isEmpty()) {
                             // just grab a buffer from the free list
                             buffer = this.free.pollFirst();
                             accumulated = size;
                         } else {
+                            //非标准批次大小
                             // we'll need to allocate memory, but we may only get
                             // part of what we need on this iteration
                             freeUp(size - accumulated);
@@ -182,6 +196,7 @@ public class BufferPool {
                     accumulated = 0;
                 } finally {
                     // When this loop was not able to successfully terminate don't loose available memory
+                    //没拿成功得记得释放内存还有移除等待队列 FIXME
                     this.nonPooledAvailableMemory += accumulated;
                     this.waiters.remove(moreMemory);
                 }
@@ -190,6 +205,7 @@ public class BufferPool {
             // signal any additional waiters if there is more memory left
             // over for them
             try {
+                //就有人超时了把他手上的内存释放了，同时还有人在等，这叫醒
                 if (!(this.nonPooledAvailableMemory == 0 && this.free.isEmpty()) && !this.waiters.isEmpty())
                     this.waiters.peekFirst().signal();
             } finally {
@@ -198,6 +214,7 @@ public class BufferPool {
             }
         }
 
+        //标准的直接返回，不然进去里面Allocate
         if (buffer == null)
             return safeAllocateByteBuffer(size);
         else
@@ -220,6 +237,7 @@ public class BufferPool {
             error = false;
             return buffer;
         } finally {
+            //出错了释放锁，把数量加回去
             if (error) {
                 this.lock.lock();
                 try {
@@ -258,7 +276,9 @@ public class BufferPool {
     public void deallocate(ByteBuffer buffer, int size) {
         lock.lock();
         try {
+            //还回内存等于一个标准批次，保证free队列中都是标准的，不规则的是小概率事件
             if (size == this.poolableSize && size == buffer.capacity()) {
+                //清空
                 buffer.clear();
                 this.free.add(buffer);
             } else {
@@ -266,6 +286,7 @@ public class BufferPool {
             }
             Condition moreMem = this.waiters.peekFirst();
             if (moreMem != null)
+                //释放了内存，唤醒等待内存的线程
                 moreMem.signal();
         } finally {
             lock.unlock();
